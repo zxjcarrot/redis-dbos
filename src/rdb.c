@@ -36,6 +36,7 @@
 #include "functions.h"
 #include "intset.h"  /* Compact integer set structure */
 #include "bio.h"
+       #include <sys/prctl.h>
 
 #include <math.h>
 #include <fcntl.h>
@@ -47,6 +48,10 @@
 #include <sys/stat.h>
 #include <sys/param.h>
 
+#ifdef DBOS
+#include "dune.h"
+#include "fast_spawn.h"
+#endif
 /* This macro is called when the internal RDB structure is corrupt */
 #define rdbReportCorruptRDB(...) rdbReportError(1, __LINE__,__VA_ARGS__)
 /* This macro is called when RDB read failed (possibly a short read) */
@@ -1355,6 +1360,9 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
          * OS and possibly avoid or decrease COW. We give the dismiss
          * mechanism a hint about an estimated size of the object we stored. */
         size_t dump_size = rdb->processed_bytes - rdb_bytes_before_key;
+        // #ifdef DBOS
+        // dune_printf("dump_size so far %lu\n", rdb->processed_bytes);
+        // #endif
         if (server.in_fork_child) dismissObject(o, dump_size);
 
         /* Update child info every 1 second (approximately).
@@ -1475,6 +1483,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
         return C_ERR;
     }
 
+    #ifdef DBOS
+    dune_printf("rdbSaveInternal %s, fp %p, server.rdb_save_incremental_fsync %d\n", filename, fp, server.rdb_save_incremental_fsync);
+    #endif
     rioInitWithFile(&rdb,fp);
 
     if (server.rdb_save_incremental_fsync) {
@@ -1500,6 +1511,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 
 werr:
     saved_errno = errno;
+    #ifdef DBOS
+    dune_printf("Write error while saving DB to the disk(%s): %s\n", err_op, strerror(errno));
+    #endif
     serverLog(LL_WARNING,"Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
     if (fp) fclose(fp);
     unlink(filename);
@@ -1524,13 +1538,15 @@ int rdbSaveToFile(const char *filename) {
 }
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
-int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
+int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags, pid_t pid) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
 
     startSaving(RDBFLAGS_NONE);
-    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
-
+    snprintf(tmpfile,256,"temp-%d.rdb", (int) pid);
+    #ifdef DBOS
+    dune_printf("saving to %s\n", tmpfile);
+    #endif
     if (rdbSaveInternal(req,tmpfile,rsi,rdbflags) != C_OK) {
         stopSaving(0);
         return C_ERR;
@@ -1558,8 +1574,12 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         stopSaving(0);
         return C_ERR;
     }
+    #ifdef DBOS
+    dune_printf("DB saved on disk, tmpfile %s, dbfile %s\n", tmpfile, filename);
+    #else
+    serverLog(LL_NOTICE,"DB saved on disk, tmpfile %s, dbfile %s", tmpfile, filename);
+    #endif
 
-    serverLog(LL_NOTICE,"DB saved on disk");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
@@ -1567,22 +1587,111 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     return C_OK;
 }
 
+
+#ifdef DBOS
+typedef struct dbosRdbSaveArguments {
+    int req;
+    char *filename;
+    rdbSaveInfo rsi;
+    int rsi_null;
+    int rdbflags;
+} dbosRdbSaveArguments;
+
+dbosRdbSaveArguments dbosRdbSaveArguments_args;
+static void* dbosRdbSaveBackground(void*) {
+    //sleep(1000);
+    int retval = rdbSave(dbosRdbSaveArguments_args.req, dbosRdbSaveArguments_args.filename, 
+                         dbosRdbSaveArguments_args.rsi_null ? NULL : &dbosRdbSaveArguments_args.rsi,dbosRdbSaveArguments_args.rdbflags, 
+                         dune_fast_spawn_snapshot_thread_id());
+    if (retval == C_OK) {
+        sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
+    } else {
+        dune_printf("rdbSave error %d\n", retval);
+    }
+
+    return NULL;
+}
+#endif
+
 int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     pid_t childpid;
-
+    int purpose = CHILD_TYPE_RDB;
     if (hasActiveChildProcess()) return C_ERR;
     server.stat_rdb_saves++;
 
     server.dirty_before_bgsave = server.dirty;
     server.lastbgsave_try = time(NULL);
 
+    #ifdef DBOS
+    if (isMutuallyExclusiveChildType(purpose)) {
+        if (hasActiveChildProcess()) {
+            errno = EEXIST;
+            return -1;
+        }
+
+        openChildInfoPipe();
+    }
+    dbosRdbSaveArguments_args.req = req;
+    dbosRdbSaveArguments_args.filename = filename;
+    if (rsi) {
+        dbosRdbSaveArguments_args.rsi = *rsi;
+        dbosRdbSaveArguments_args.rsi_null = 0;
+    } else {
+        dbosRdbSaveArguments_args.rsi_null = 1;
+    }
+
+    dbosRdbSaveArguments_args.rdbflags = rdbflags;
+    childpid = dune_fast_spawn_snapshot_thread_id();
+    long long start = ustime();
+    
+    dune_fast_spawn_on_snapshot(dbosRdbSaveBackground, NULL);
+    server.stat_total_forks++;
+    server.stat_fork_time = ustime()-start;
+    server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
+    latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
+
+    /* The child_pid and child_type are only for mutually exclusive children.
+        * other child types should handle and store their pid's in dedicated variables.
+        *
+        * Today, we allows CHILD_TYPE_LDB to run in parallel with the other fork types:
+        * - it isn't used for production, so it will not make the server be less efficient
+        * - used for debugging, and we don't want to block it from running while other
+        *   forks are running (like RDB and AOF) */
+    if (isMutuallyExclusiveChildType(purpose)) {
+        server.child_pid = childpid;
+        server.child_type = purpose;
+        server.stat_current_cow_peak = 0;
+        server.stat_current_cow_bytes = 0;
+        server.stat_current_cow_updated = 0;
+        server.stat_current_save_keys_processed = 0;
+        server.stat_module_progress = 0;
+        server.stat_current_save_keys_total = dbTotalServerKeyCount();
+    }
+
+    updateDictResizePolicy();
+    moduleFireServerEvent(REDISMODULE_EVENT_FORK_CHILD,
+                            REDISMODULE_SUBEVENT_FORK_CHILD_BORN,
+                            NULL);
+
+    serverLog(LL_NOTICE,"Background saving started by pid %ld, took %lu us",(long) childpid, server.stat_fork_time);
+    server.rdb_save_time_start = time(NULL);
+    server.rdb_child_type = RDB_CHILD_TYPE_DISK;
+    return C_OK;
+
+    #else 
+
+    #ifdef ODF
+    prctl(65, 0, 0, 0, 0);
+    serverLog(LL_NOTICE, "enabled on-demand-fork through prctl(65, 0, 0, 0, 0)");
+    #endif
+    long long start = ustime();
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
         int retval;
 
         /* Child */
         redisSetProcTitle("redis-rdb-bgsave");
         redisSetCpuAffinity(server.bgsave_cpulist);
-        retval = rdbSave(req, filename,rsi,rdbflags);
+        retval = rdbSave(req, filename,rsi,rdbflags, getpid());
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
@@ -1595,12 +1704,14 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
                 strerror(errno));
             return C_ERR;
         }
-        serverLog(LL_NOTICE,"Background saving started by pid %ld",(long) childpid);
+        long long end = ustime();
+        serverLog(LL_NOTICE,"Background saving started by pid %ld, took %ld us\n",(long) childpid, (end - start) / 1000);
         server.rdb_save_time_start = time(NULL);
         server.rdb_child_type = RDB_CHILD_TYPE_DISK;
         return C_OK;
     }
     return C_OK; /* unreached */
+    #endif
 }
 
 /* Note that we may call this function in signal handle 'sigShutdownHandler',
@@ -3666,7 +3777,7 @@ void saveCommand(client *c) {
 
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
-    if (rdbSave(SLAVE_REQ_NONE,server.rdb_filename,rsiptr,RDBFLAGS_NONE) == C_OK) {
+    if (rdbSave(SLAVE_REQ_NONE,server.rdb_filename,rsiptr,RDBFLAGS_NONE, getpid()) == C_OK) {
         addReply(c,shared.ok);
     } else {
         addReplyErrorObject(c,shared.err);
@@ -3708,6 +3819,15 @@ void bgsaveCommand(client *c) {
     } else {
         addReplyErrorObject(c,shared.err);
     }
+    serverLog(LL_NOTICE, "bgsaveCommand");
+
+    // void* callstack[128];
+    // int i, frames = backtrace(callstack, 128);
+    // char** strs = backtrace_symbols(callstack, frames);
+    // for (i = 0; i < frames; ++i) {
+    //     serverLog(LL_NOTICE, "%s\n", strs[i]);
+    // }
+    //free((void*)strs);
 }
 
 /* Populate the rdbSaveInfo structure used to persist the replication

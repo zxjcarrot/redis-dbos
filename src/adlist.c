@@ -32,7 +32,9 @@
 #include <stdlib.h>
 #include "adlist.h"
 #include "zmalloc.h"
-
+#ifdef DBOS
+#include "dune.h"
+#endif
 /* Create a new list. The created list can be freed with
  * listRelease(), but private value of every node need to be freed
  * by the user before to call listRelease(), or by setting a free method using
@@ -103,6 +105,11 @@ list *listAddNodeHead(list *list, void *value)
  * Add a node that has already been allocated to the head of list
  */
 void listLinkNodeHead(list* list, listNode *node) {
+    #ifdef DBOS
+    if (node == NULL || list == NULL) {
+        assert(false);
+    }
+    #endif
     if (list->len == 0) {
         list->head = list->tail = node;
         node->prev = node->next = NULL;

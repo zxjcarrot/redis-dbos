@@ -41,6 +41,10 @@
 #include <sys/wait.h>
 #include <sys/param.h>
 
+#ifdef DBOS
+#include "dune.h"
+#endif
+
 void freeClientArgv(client *c);
 off_t getAppendOnlyFileSize(sds filename, int *status);
 off_t getBaseAndIncrAppendOnlyFilesSize(aofManifest *am, int *status);
@@ -2409,6 +2413,22 @@ werr:
     stopSaving(0);
     return C_ERR;
 }
+#ifdef DBOS
+static void* dbosRewriteAppendOnlyFileBackground(void* arg) {
+    char tmpfile[256];
+    //redisSetProcTitle("redis-aof-rewrite");
+    //redisSetCpuAffinity(server.aof_rewrite_cpulist);
+    snprintf(tmpfile,256,"temp-rewriteaof-bg-%d.aof", (int) getpid());
+    if (rewriteAppendOnlyFile(tmpfile) == C_OK) {
+        serverLog(LL_NOTICE,
+            "Successfully created the temporary AOF base file %s", tmpfile);
+        sendChildCowInfo(CHILD_INFO_TYPE_AOF_COW_SIZE, "AOF rewrite");
+        return NULL;
+    } else {
+        return NULL;
+    }
+}
+#endif
 /* ----------------------------------------------------------------------------
  * AOF background rewrite
  * ------------------------------------------------------------------------- */
@@ -2429,7 +2449,7 @@ werr:
  */
 int rewriteAppendOnlyFileBackground(void) {
     pid_t childpid;
-
+    int purpose = CHILD_TYPE_AOF;
     if (hasActiveChildProcess()) return C_ERR;
 
     if (dirCreateIfMissing(server.aof_dirname) == -1) {
@@ -2464,6 +2484,55 @@ int rewriteAppendOnlyFileBackground(void) {
 
     server.stat_aof_rewrites++;
 
+    #ifdef DBOS
+    if (isMutuallyExclusiveChildType(purpose)) {
+        if (hasActiveChildProcess()) {
+            errno = EEXIST;
+            return -1;
+        }
+
+        openChildInfoPipe();
+    }
+
+    childpid = dune_fast_spawn_snapshot_thread_id();
+    long long start = ustime();
+    dune_fast_spawn_on_snapshot(dbosRewriteAppendOnlyFileBackground, NULL);
+    server.stat_total_forks++;
+    server.stat_fork_time = ustime()-start;
+    server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
+    latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
+
+    /* The child_pid and child_type are only for mutually exclusive children.
+        * other child types should handle and store their pid's in dedicated variables.
+        *
+        * Today, we allows CHILD_TYPE_LDB to run in parallel with the other fork types:
+        * - it isn't used for production, so it will not make the server be less efficient
+        * - used for debugging, and we don't want to block it from running while other
+        *   forks are running (like RDB and AOF) */
+    if (isMutuallyExclusiveChildType(purpose)) {
+        server.child_pid = childpid;
+        server.child_type = purpose;
+        server.stat_current_cow_peak = 0;
+        server.stat_current_cow_bytes = 0;
+        server.stat_current_cow_updated = 0;
+        server.stat_current_save_keys_processed = 0;
+        server.stat_module_progress = 0;
+        server.stat_current_save_keys_total = dbTotalServerKeyCount();
+    }
+
+    updateDictResizePolicy();
+    moduleFireServerEvent(REDISMODULE_EVENT_FORK_CHILD,
+                            REDISMODULE_SUBEVENT_FORK_CHILD_BORN,
+                            NULL);
+    serverLog(LL_NOTICE,
+            "Background append only file rewriting started by pid %ld",(long) childpid);
+    server.aof_rewrite_scheduled = 0;
+    server.aof_rewrite_time_start = time(NULL);
+
+    return C_OK;
+
+    #else 
+
     if ((childpid = redisFork(CHILD_TYPE_AOF)) == 0) {
         char tmpfile[256];
 
@@ -2495,6 +2564,7 @@ int rewriteAppendOnlyFileBackground(void) {
         return C_OK;
     }
     return C_OK; /* unreached */
+    #endif
 }
 
 void bgrewriteaofCommand(client *c) {

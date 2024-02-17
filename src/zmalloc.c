@@ -721,6 +721,7 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid) {
     }
 
     if (!fp) return 0;
+    int lines = 0;
     while(fgets(line,sizeof(line),fp) != NULL) {
         if (strncmp(line,field,flen) == 0) {
             char *p = strchr(line,'k');
@@ -728,6 +729,9 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid) {
                 *p = '\0';
                 bytes += strtol(line+flen,NULL,10) * 1024;
             }
+        }
+        if (++lines % 10000 == 0) {
+            //printf("zmalloc_get_smap_bytes_by_field %d lines parsed\n", lines);
         }
     }
     fclose(fp);

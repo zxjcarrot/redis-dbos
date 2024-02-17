@@ -88,7 +88,8 @@ void sendChildInfoGeneric(childInfoType info_type, size_t keys, double progress,
         !cow_updated ||
         now - cow_updated > cow_update_cost * CHILD_COW_DUTY_CYCLE)
     {
-        cow = zmalloc_get_private_dirty(-1);
+        //cow = zmalloc_get_private_dirty(-1);
+        cow = 0;
         cow_updated = getMonotonicUs();
         cow_update_cost = cow_updated - now;
         if (cow > peak_cow) peak_cow = cow;
@@ -169,7 +170,7 @@ int readChildInfo(childInfoType *information_type, size_t *cow, monotime *cow_up
 /* Receive info data from child. */
 void receiveChildInfo(void) {
     if (server.child_info_pipe[0] == -1) return;
-
+    //serverLog(LL_NOTICE, "receiveChildInfo start");
     size_t cow;
     monotime cow_updated;
     size_t keys;
@@ -180,4 +181,5 @@ void receiveChildInfo(void) {
     while (readChildInfo(&information_type, &cow, &cow_updated, &keys, &progress)) {
         updateChildInfo(information_type, cow, cow_updated, keys, progress);
     }
+    //serverLog(LL_NOTICE, "receiveChildInfo end");
 }

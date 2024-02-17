@@ -104,11 +104,17 @@ void rioInitWithBuffer(rio *r, sds s) {
     r->io.buffer.ptr = s;
     r->io.buffer.pos = 0;
 }
+#ifdef DBOS
+#include "dune.h"
 
+#endif
 /* --------------------- Stdio file pointer implementation ------------------- */
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
+    // #ifdef DBOS
+    // dune_printf("rioFileWrite p %p, p[0] %c len %lu, r->io.file.fp %p\n", buf, ((char*)buf)[0], len, r->io.file.fp);
+    // #endif
     if (!r->io.file.autosync) return fwrite(buf,len,1,r->io.file.fp);
 
     size_t nwritten = 0;
@@ -123,7 +129,7 @@ static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
         if (fwrite((char*)buf+nwritten,towrite,1,r->io.file.fp) == 0) return 0;
         nwritten += towrite;
         r->io.file.buffered += towrite;
-
+        // usleep(100);
         if (r->io.file.buffered >= r->io.file.autosync) {
             fflush(r->io.file.fp);
 

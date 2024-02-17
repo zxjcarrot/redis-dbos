@@ -63,6 +63,11 @@
 #include "server.h"
 #include "bio.h"
 
+#ifdef DBOS
+#include "dune.h"
+#include "fast_spawn.h"
+#endif
+
 static char* bio_worker_title[] = {
     "bio_close_file",
     "bio_aof",
@@ -79,6 +84,7 @@ static unsigned int bio_job_to_worker[] = {
 };
 
 static pthread_t bio_threads[BIO_WORKER_NUM];
+static cpu_set_t bio_cpusets[BIO_WORKER_NUM];
 static pthread_mutex_t bio_mutex[BIO_WORKER_NUM];
 static pthread_cond_t bio_newjob_cond[BIO_WORKER_NUM];
 static list *bio_jobs[BIO_WORKER_NUM];
@@ -114,7 +120,7 @@ void *bioProcessBackgroundJobs(void *arg);
 /* Make sure we have enough stack to perform all the things we do in the
  * main thread. */
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
-
+extern int redis_thread_count;
 /* Initialize the background system, spawning the thread. */
 void bioInit(void) {
     pthread_attr_t attr;
@@ -141,6 +147,10 @@ void bioInit(void) {
      * responsible for. */
     for (j = 0; j < BIO_WORKER_NUM; j++) {
         void *arg = (void*)(unsigned long) j;
+        CPU_ZERO(&bio_cpusets[j]);
+        CPU_SET(redis_thread_count++, &bio_cpusets[j]);
+        pthread_attr_setaffinity_np(&attr, sizeof(bio_cpusets[j]), &bio_cpusets[j]);
+        serverLog(LL_NOTICE, "Creating BIO Thread %d on core %d\n", j, redis_thread_count - 1);
         if (pthread_create(&thread,&attr,bioProcessBackgroundJobs,arg) != 0) {
             serverLog(LL_WARNING, "Fatal: Can't initialize Background Jobs. Error message: %s", strerror(errno));
             exit(1);
@@ -207,6 +217,23 @@ void *bioProcessBackgroundJobs(void *arg) {
     unsigned long worker = (unsigned long) arg;
     sigset_t sigset;
 
+    // #ifdef DBOS
+    // int cpu_id = sched_getcpu();
+	// dune_ipi_set_cpu_id(cpu_id);
+    // printf("dune bio thread %d running on core %d, before\n", worker, cpu_id);
+
+    // int ret = dune_enter();
+	// if (ret) {
+	// 	printf("failed to enter dune\n");
+	// 	return ret;
+	// }
+   
+    // dune_printf("dune bio thread %d running on core %d, after\n", worker, cpu_id);
+    // volatile fast_spawn_state_t* state = dune_get_fast_spawn_state();
+
+	// dune_set_thread_state(state, cpu_id, DUNE_THREAD_MAIN);
+    // #endif
+
     /* Check that the worker is within the right interval. */
     serverAssert(worker < BIO_WORKER_NUM);
 
@@ -230,6 +257,10 @@ void *bioProcessBackgroundJobs(void *arg) {
 
         /* The loop always starts with the lock hold. */
         if (listLength(bio_jobs[worker]) == 0) {
+            // struct timespec timeToWait;
+            // timeToWait.tv_sec = 0;
+            // timeToWait.tv_nsec = 100000;
+            // pthread_cond_timedwait(&bio_newjob_cond[worker], &bio_mutex[worker], &timeToWait);
             pthread_cond_wait(&bio_newjob_cond[worker], &bio_mutex[worker]);
             continue;
         }

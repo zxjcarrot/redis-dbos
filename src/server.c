@@ -76,6 +76,10 @@
 #define GNUC_VERSION_STR "0.0.0"
 #endif
 
+#ifdef DBOS
+#include "dune.h"
+#include "fast_spawn.h"
+#endif
 /* Our shared "common" objects */
 
 struct sharedObjectsStruct shared;
@@ -257,6 +261,7 @@ mstime_t commandTimeSnapshot(void) {
  * the parent process. However if we are testing the coverage normal exit() is
  * used in order to obtain the right coverage information. */
 void exitFromChild(int retcode) {
+    serverLog(LL_NOTICE, "exiting from child %d", retcode);
 #ifdef COVERAGE_TEST
     exit(retcode);
 #else
@@ -1228,6 +1233,34 @@ void checkChildrenDone(void) {
     int statloc = 0;
     pid_t pid;
 
+    #ifdef DBOS
+    // serverLog(LL_NOTICE,
+    //                       "checkChildrenDone before");
+    if (hasActiveChildProcess() && !dune_fast_spawn_snapshot_running()) {
+        int bysignal = 0;
+        int exitcode = 0;
+        if (server.child_type == CHILD_TYPE_RDB) {
+            backgroundSaveDoneHandler(exitcode, bysignal);
+        } else if (server.child_type == CHILD_TYPE_AOF) {
+            backgroundRewriteDoneHandler(exitcode, bysignal);
+        } else if (server.child_type == CHILD_TYPE_MODULE) {
+            ModuleForkDoneHandler(exitcode, bysignal);
+        } else {
+            serverPanic("Unknown child type %d for child pid %d", server.child_type, server.child_pid);
+            exit(1);
+        }
+        if (!bysignal && exitcode == 0) receiveChildInfo();
+        resetChildState();
+        int cpu_id = dune_get_cpu_id();
+        fast_spawn_state_t * state = dune_get_fast_spawn_state();
+        dune_printf("rdb save stats: shootdowns %d, cycles per shootdown %lu, ipi_calls %lu for snapshot core %d, write calls %d, write_latency %lu, cycles_between_consecutive_writes %lu, syscalls %lu\n", state->shootdowns[cpu_id], state->cycles_spent_for_shootdown[cpu_id] / (state->shootdowns[cpu_id] + 1), state->ipi_calls[SNAPSHOT_CORE], SNAPSHOT_CORE, state->write_calls[SNAPSHOT_CORE],  state->cycles_per_write_syscall[SNAPSHOT_CORE] / ( state->write_calls[SNAPSHOT_CORE] + 1), state->cycles_between_consecutive_writes[SNAPSHOT_CORE] / (state->write_calls[SNAPSHOT_CORE] + 1), state->syscalls[SNAPSHOT_CORE]);
+
+        // serverLog(LL_NOTICE,
+        //                   "checkChildrenDone done 1");
+    }
+    // serverLog(LL_NOTICE,
+    //                       "checkChildrenDone done 2");
+    #else
     if ((pid = waitpid(-1, &statloc, WNOHANG)) != 0) {
         int exitcode = WIFEXITED(statloc) ? WEXITSTATUS(statloc) : -1;
         int bysignal = 0;
@@ -1273,6 +1306,7 @@ void checkChildrenDone(void) {
         /* start any pending forks immediately. */
         replicationStartPendingFork();
     }
+    #endif
 }
 
 /* Called from serverCron and cronUpdateMemoryStats to update cached memory metrics. */
@@ -1457,6 +1491,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         rewriteAppendOnlyFileBackground();
     }
 
+    //serverLog(LL_NOTICE, "serverCron before checkChildrenDone");
     /* Check if a background saving or AOF rewrite in progress terminated. */
     if (hasActiveChildProcess() || ldbPendingChildren())
     {
@@ -1594,6 +1629,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     server.el_cron_duration = getMonotonicUs() - cron_start;
 
+
+    // void* callstack[128];
+    // int i, frames = backtrace(callstack, 128);
+    // char** strs = backtrace_symbols(callstack, frames);
+    // for (i = 0; i < frames; ++i) {
+    //     serverLog(LL_NOTICE, "%s", strs[i]);
+    // }
     return 1000/server.hz;
 }
 
@@ -2655,7 +2697,7 @@ void initServer(void) {
 
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
-    setupSignalHandlers();
+    //setupSignalHandlers();
     ThreadsManager_init();
     makeThreadKillable();
 
@@ -3924,6 +3966,7 @@ uint64_t getCommandFlags(client *c) {
  * other operations can be performed by the caller. Otherwise
  * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
 int processCommand(client *c) {
+    //serverLog(LL_NOTICE, "processCommand");
     if (!scriptIsTimedout()) {
         /* Both EXEC and scripts call call() directly so there should be
          * no way in_exec or scriptIsRunning() is 1.
@@ -4505,7 +4548,7 @@ int finishShutdown(void) {
         rdbSaveInfo rsi, *rsiptr;
         rsiptr = rdbPopulateSaveInfo(&rsi);
         /* Keep the page cache since it's likely to restart soon */
-        if (rdbSave(SLAVE_REQ_NONE,server.rdb_filename,rsiptr,RDBFLAGS_KEEP_CACHE) != C_OK) {
+        if (rdbSave(SLAVE_REQ_NONE,server.rdb_filename,rsiptr,RDBFLAGS_KEEP_CACHE, getpid()) != C_OK) {
             /* Ooops.. error saving! The best we can do is to continue
              * operating. Note that if there was a background saving process,
              * in the next cron() Redis will be notified that the background
@@ -6304,14 +6347,24 @@ void redisAsciiArt(void) {
     else if (server.sentinel_mode) mode = "sentinel";
     else mode = "standalone";
 
+    serverLog(LL_NOTICE,
+            "redisAsciiArt 1"
+        );
     /* Show the ASCII logo if: log file is stdout AND stdout is a
      * tty AND syslog logging is disabled. Also show logo if the user
      * forced us to do so via redis.conf. */
+    int stdout_fileno = fileno(stdout);
+    bool fileno_isatty = true;//isatty(stdout_fileno);
+    serverLog(LL_NOTICE,
+        "redisAsciiArt 11"
+    );
     int show_logo = ((!server.syslog_enabled &&
                       server.logfile[0] == '\0' &&
-                      isatty(fileno(stdout))) ||
+                      fileno_isatty) ||
                      server.always_show_logo);
-
+    serverLog(LL_NOTICE,
+        "redisAsciiArt 2"
+    );
     if (!show_logo) {
         serverLog(LL_NOTICE,
             "Running mode=%s, port=%d.",
@@ -6328,6 +6381,9 @@ void redisAsciiArt(void) {
         );
         serverLogRaw(LL_NOTICE|LL_RAW,buf);
     }
+    serverLog(LL_NOTICE,
+        "redisAsciiArt 3"
+    );
     zfree(buf);
 }
 
@@ -6388,6 +6444,12 @@ static void sigShutdownHandler(int sig) {
      * on disk and without waiting for lagging replicas. */
     if (server.shutdown_asap && sig == SIGINT) {
         serverLogRawFromHandler(LL_WARNING, "You insist... exiting now.");
+        // void* callstack[128];
+        // int i, frames = backtrace(callstack, 128);
+        // char** strs = backtrace_symbols(callstack, frames);
+        // for (i = 0; i < frames; ++i) {
+        //     serverLogFromHandler(LL_WARNING, "%s\n", strs[i]);
+        // }
         rdbRemoveTempFile(getpid(), 1);
         exit(1); /* Exit with an error since this was not a clean shutdown. */
     } else if (server.loading) {
@@ -6461,7 +6523,12 @@ int redisFork(int purpose) {
 
     int childpid;
     long long start = ustime();
+    // #ifdef ODF
+    // serverLog(LL_NOTICE,"on-demand-fork");
+    // if ((childpid = syscall(439)) == 0) {
+    // #else
     if ((childpid = fork()) == 0) {
+    //#endif
         /* Child.
          *
          * The order of setting things up follows some reasoning:
@@ -6895,12 +6962,48 @@ redisTestProc *getTestProcByName(const char *name) {
 }
 #endif
 
+int redis_thread_count = 0;
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
     char config_from_stdin = 0;
 
+    cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(redis_thread_count++, &cpuset);
+
+   	pthread_t main_thread = pthread_self();    
+   	pthread_setaffinity_np(main_thread, sizeof(cpu_set_t), &cpuset);
+    
+    #ifdef DBOS
+    dune_procmap_dump();
+    int ret = dune_init_with_ipi(1);
+	if (ret) {
+		printf("failed to initialize dune\n");
+		return ret;
+	}
+	ret = dune_enter();
+	if (ret) {
+		printf("failed to enter dune\n");
+		return ret;
+	}
+    dune_ipi_set_cpu_id(0);
+    dune_set_max_cores(6);
+    dune_fast_spawn_configure();
+
+    volatile fast_spawn_state_t* state = dune_get_fast_spawn_state();
+
+	dune_set_thread_state(state, 0, DUNE_THREAD_MAIN);
+    
+    if (dune_fast_spawn_init()) {
+        printf("failed to initialize fast_spawn\n");
+    } else {
+        printf("dune dbos fast_spawn intialized\n");
+    }
+    
+    #endif
 #ifdef REDIS_TEST
+
     monotonicInit(); /* Required for dict tests, that are relying on monotime during dict rehashing. */
     if (argc >= 3 && !strcasecmp(argv[1], "test")) {
         int flags = 0;
@@ -7167,9 +7270,12 @@ int main(int argc, char **argv) {
     }
 
     initServer();
+    serverLog(LL_NOTICE,"initServer finished");
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);
+    serverLog(LL_NOTICE,"before redisAsciiArt");
     redisAsciiArt();
+    serverLog(LL_NOTICE,"before checkTcpBacklogSettings");
     checkTcpBacklogSettings();
     if (server.cluster_enabled) {
         clusterInit();
@@ -7178,13 +7284,14 @@ int main(int argc, char **argv) {
         moduleInitModulesSystemLast();
         moduleLoadFromQueue();
     }
+    serverLog(LL_NOTICE,"before ACLLoadUsersAtStartup");
     ACLLoadUsersAtStartup();
     initListeners();
     if (server.cluster_enabled) {
         clusterInitLast();
     }
     InitServerLast();
-
+    serverLog(LL_NOTICE,"InitServerLast finished");
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_NOTICE,"Server initialized");
@@ -7227,7 +7334,10 @@ int main(int argc, char **argv) {
 
     redisSetCpuAffinity(server.server_cpulist);
     setOOMScoreAdj(-1);
-
+    
+    #ifdef DBOS
+    dune_fast_spawn_signal_copy_worker();
+    #endif
     aeMain(server.el);
     aeDeleteEventLoop(server.el);
     return 0;

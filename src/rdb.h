@@ -159,7 +159,7 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags);
 int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi);
 void rdbRemoveTempFile(pid_t childpid, int from_signal);
 int rdbSaveToFile(const char *filename);
-int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags);
+int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags, pid_t pid);
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid);
 size_t rdbSavedObjectLen(robj *o, robj *key, int dbid);
 robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error);

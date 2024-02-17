@@ -3,7 +3,7 @@
 default: all
 
 .DEFAULT:
-	cd src && $(MAKE) $@
+	cd src && $(MAKE) $@ --trace
 
 install:
 	cd src && $(MAKE) $@

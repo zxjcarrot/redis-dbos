@@ -38,6 +38,9 @@
 #include <math.h>
 #include <ctype.h>
 
+#ifdef DBOS
+#include "dune.h"
+#endif
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 int postponeClientRead(client *c);
@@ -235,6 +238,28 @@ void installClientWriteHandler(client *c) {
     }
 }
 
+#ifdef DBOS
+typedef struct page_table_walk_args {
+    void* target_addr;
+    int cnt;
+    int match;
+}page_table_walk_args;
+static int page_table_walk_cb(const void *arg, ptent_t *pte, void *va, int level) {
+    page_table_walk_args * walk_arg = (struct page_table_walk_args*)arg;
+    if (PTE_ADDR(*pte) == dune_va_to_pa(walk_arg->target_addr)) {
+        if (++walk_arg->match >= 2) {
+            dune_printf("At least two virtual addresses point to %p, current %p\n", walk_arg->target_addr, va);
+            assert(false);
+        } 
+    }
+    if (va != 0 && PTE_ADDR(*pte) == 0) {
+        dune_printf("physical address is null for virtual address %p, pte %p\n", va, *pte);
+        assert(false);
+    }
+    ++walk_arg->cnt;
+    return 0;
+}
+#endif
 /* This function puts the client in the queue of clients that should write
  * their output buffers to the socket. Note that it does not *yet* install
  * the write handler, to start clients are put in a queue of clients that need
@@ -257,7 +282,71 @@ void putClientInPendingWriteQueue(client *c) {
          * a system call. We'll only really install the write handler if
          * we'll not be able to write the whole reply at once. */
         c->flags |= CLIENT_PENDING_WRITE;
+        #ifdef DBOS
+        uint64_t head_addr =  &server.clients_pending_write->head;
+        
+        
+        // serverLog(LL_NOTICE, "server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p", 
+        //             server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        // dune_printf("server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p\n", 
+        //             server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        //dune_flush_tlb();
+        assert(head_addr);
         listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        // ptent_t * pte_out;
+        // dune_vm_lookup(pgroot, PGADDR(head_addr), 0, &pte_out);
+        // dune_printf("handleClientsWithPendingWrites listLength %d, vaddr %p, paddr %p, FLAGS %p\n", listLength(server.clients_pending_write), &server.clients_pending_write->head, PTE_ADDR(*pte_out), PTE_FLAGS(*pte_out));
+
+        // page_table_walk_args walk_args;
+        // walk_args.target_addr = PGADDR(head_addr);
+        // walk_args.cnt = 0;
+        // walk_args.match = 0;
+        // int ret = dune_vm_page_walk(pgroot, VA_START, VA_END, page_table_walk_cb, &walk_args);
+        // dune_printf("target_addr %p walk_args.cnt %d walk_args.match %d\n", walk_args.target_addr, walk_args.cnt, walk_args.match);
+        // assert(ret == 0);
+        // assert(walk_args.match == 1);
+        // server.clients_pending_write->dup = &c->clients_pending_write_node;
+        // server.clients_pending_write->free = &c->clients_pending_write_node;
+        // server.clients_pending_write->match = &c->clients_pending_write_node;
+        
+        //dune_printf("server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p\n", server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        // dune_printf("server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p\n", server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        // dune_printf("server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p\n", server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        if (listLength(server.clients_pending_write) == 1) {
+            serverAssert(server.clients_pending_write->head == &c->clients_pending_write_node);
+            serverAssert(server.clients_pending_write->tail == &c->clients_pending_write_node);
+        }
+        
+
+
+        //serverAssert(server.clients_pending_write->head == &c->clients_pending_write_node);
+        //serverAssert(server.clients_pending_write->head == &c->clients_pending_write_node);
+        // dune_printf("server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p\n", server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+
+        //serverAssert(server.clients_pending_write->tail == &c->clients_pending_write_node);
+        //dune_flush_tlb();
+        // serverLog(LL_NOTICE, "server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p", 
+        //             server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        // serverLog(LL_NOTICE, "server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p", 
+        //             server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        // serverLog(LL_NOTICE, "server.clients_pending_write %p, &server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, dup %p, free %p, match %p, len %d, &c->clients_pending_write_node %p", 
+        //             server.clients_pending_write, head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, server.clients_pending_write->dup, server.clients_pending_write->free, server.clients_pending_write->match, server.clients_pending_write->len, &c->clients_pending_write_node);
+        
+    //dune_flush_tlb();
+        // serverLog(LL_NOTICE, "&server.clients_pending_write->head %p, server.clients_pending_write->head %p, tail %p, &c->clients_pending_write_node %p", 
+        //             head_addr, server.clients_pending_write->head, server.clients_pending_write->tail, &c->clients_pending_write_node);
+
+        //serverAssert(server.clients_pending_write->head == &c->clients_pending_write_node);
+        serverAssert(server.clients_pending_write->head != NULL);
+        // void* callstack[128];
+        // int i, frames = backtrace(callstack, 128);
+        // char** strs = backtrace_symbols(callstack, frames);
+        // for (i = 0; i < frames; ++i) {
+        //     serverLog(LL_NOTICE, "%s", strs[i]);
+        // }
+        #else
+        listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        #endif
     }
 }
 
@@ -2032,6 +2121,12 @@ int writeToClient(client *c, int handler_installed) {
 
 /* Write event handler. Just send data to the client. */
 void sendReplyToClient(connection *conn) {
+    // void* callstack[128];
+    // int i, frames = backtrace(callstack, 128);
+    // char** strs = backtrace_symbols(callstack, frames);
+    // for (i = 0; i < frames; ++i) {
+    //     serverLog(LL_NOTICE, "%s", strs[i]);
+    // }
     client *c = connGetPrivateData(conn);
     writeToClient(c,1);
 }
@@ -2046,6 +2141,10 @@ int handleClientsWithPendingWrites(void) {
     int processed = listLength(server.clients_pending_write);
 
     listRewind(server.clients_pending_write,&li);
+    if (processed > 0) {
+        serverAssert(li.next != NULL);
+        serverAssert(server.clients_pending_write->head != NULL);
+    }
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         c->flags &= ~CLIENT_PENDING_WRITE;
@@ -2067,6 +2166,14 @@ int handleClientsWithPendingWrites(void) {
             installClientWriteHandler(c);
         }
     }
+    // int now_processed = listLength(server.clients_pending_write);
+    // serverLog(LL_NOTICE, "handleClientsWithPendingWrites processed %d now_processed %d\n", processed, now_processed);
+    // void* callstack[128];
+    // int i, frames = backtrace(callstack, 128);
+    // char** strs = backtrace_symbols(callstack, frames);
+    // for (i = 0; i < frames; ++i) {
+    //     serverLog(LL_NOTICE, "%s", strs[i]);
+    // }
     return processed;
 }
 

@@ -16,15 +16,15 @@ release_hdr := $(shell sh -c './mkreleasehdr.sh')
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 uname_M := $(shell sh -c 'uname -m 2>/dev/null || echo not')
 CLANG := $(findstring clang,$(shell sh -c '$(CC) --version | head -1'))
-OPTIMIZATION?=-O3
-ifeq ($(OPTIMIZATION),-O3)
-	ifeq (clang,$(CLANG))
-		REDIS_CFLAGS+=-flto
-	else
-		REDIS_CFLAGS+=-flto=auto
-	endif
-	REDIS_LDFLAGS+=-O3 -flto
-endif
+OPTIMIZATION?=-O2
+# ifeq ($(OPTIMIZATION),-O3)
+# 	ifeq (clang,$(CLANG))
+# 		REDIS_CFLAGS+=-flto
+# 	else
+# 		REDIS_CFLAGS+=-flto=auto
+# 	endif
+# 	REDIS_LDFLAGS+=-O3 -flto
+# endif
 DEPENDENCY_TARGETS=hiredis linenoise lua hdr_histogram fpconv
 NODEPS:=clean distclean
 
@@ -67,7 +67,7 @@ endif
 # Default allocator defaults to Jemalloc on Linux and libc otherwise
 MALLOC=libc
 ifeq ($(uname_S),Linux)
-	MALLOC=jemalloc
+	MALLOC=libc
 endif
 
 # To get ARM stack traces if Redis crashes we need a special C flag.
@@ -113,13 +113,30 @@ endif
 endif
 endif
 
+#ifdef DBOS
+#CFLAGS+=-DDBOS
+#endif
 # Override default settings if possible
 -include .make-settings
 
-FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS)
-FINAL_LDFLAGS=$(LDFLAGS) $(REDIS_LDFLAGS) $(DEBUG)
+
+ifeq ($(ENABLE_DBOS), yes)
+	CFLAGS+=-DDBOS
+endif
+
+ifeq ($(ENABLE_ODF), yes)
+	CFLAGS+=-DODF
+endif
+
+FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS) -mincoming-stack-boundary=3 -L../../../../libdune/ -I../../../libdune/
+FINAL_LDFLAGS=$(LDFLAGS) $(REDIS_LDFLAGS) $(DEBUG) -L../../../libdune/
 FINAL_LIBS=-lm
 DEBUG=-g -ggdb
+
+ifeq ($(ENABLE_DBOS), yes)
+	FINAL_LIBS+=-ldune
+endif
+
 
 # Linux ARM32 needs -latomic at linking time
 ifneq (,$(findstring armv,$(uname_M)))
